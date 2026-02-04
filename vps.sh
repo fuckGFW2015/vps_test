@@ -266,17 +266,15 @@ echo "💡 检测原理：通过访问各平台特定页面，判断是否返回
 echo "   注意：部分平台（如 Disney+）可能因 IP 信誉动态封锁，结果仅供参考"
 
 check_netflix() {
-    local result=$(timeout 8 curl -s --connect-timeout 5 -H "Accept: application/json" \
-        "https://www.netflix.com/title/80018499" 2>/dev/null)
+    local url="https://www.netflix.com/title/80018499"
+    local final_url=$(timeout 6 curl -sL -o /dev/null -w "%{url_effective}" --connect-timeout 4 "$url" 2>/dev/null)
     
-    if [[ "$result" == *"geo"* ]] || [[ "$result" == *"not available"* ]] || [[ "$result" == *"VideoPlayer"* ]]; then
-        # 返回视频页 → 解锁
+    if [[ "$final_url" == *"title/80018499"* ]]; then
         print_success "Netflix: 原生解锁（可看自制剧）"
-    elif [[ "$result" == *"location"* ]] || [[ "$result" == *"not in service"* ]]; then
-        print_error "Netflix: 未解锁（仅限本地内容）"
+    elif [[ "$final_url" == *"login"* ]] || [[ "$final_url" == *"notavailable"* ]] || [[ "$final_url" == *"help.netflix.com"* ]]; then
+        print_error "Netflix: IP 被屏蔽（重定向至限制页）"
     else
-        # 无法判断（如 403/503）
-        print_warning "Netflix: 未知状态（可能被屏蔽）"
+        print_warning "Netflix: 重定向到未知页面: $final_url"
     fi
 }
 
