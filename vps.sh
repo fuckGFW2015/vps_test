@@ -267,10 +267,18 @@ echo "   注意：部分平台（如 Disney+）可能因 IP 信誉动态封锁�
 
 check_netflix() {
     local url="https://www.netflix.com/title/80018499"
-    local final_url=$(timeout 7 curl -sL -o /dev/null -w "%{url_effective}" --connect-timeout 4 "$url" 2>/dev/null)
+    local final_url
+    final_url=$(timeout 7 curl -sL -o /dev/null -w "%{url_effective}" --connect-timeout 4 "$url" 2>/dev/null)
     
+    # ✅ 关键修复：去除首尾空白（包括换行符）
+    final_url=$(echo "$final_url" | tr -d '[:space:]')
+    
+    if [[ -z "$final_url" ]]; then
+        print_error "Netflix: 获取最终URL失败（超时或无响应）"
+        return
+    fi
+
     if [[ "$final_url" == *"title/80018499"* ]]; then
-        # 关键：获取页面内容并检查是否真有播放器
         local content=$(timeout 7 curl -sL --connect-timeout 4 "$url" 2>/dev/null)
         if [[ "$content" == *"VideoPlayer"* ]] || [[ "$content" == *"\"availabilityDate\""* ]]; then
             print_success "Netflix: 原生解锁（可看自制剧）"
@@ -280,7 +288,7 @@ check_netflix() {
     elif [[ "$final_url" == *"login"* ]] || [[ "$final_url" == *"notavailable"* ]] || [[ "$final_url" == *"help.netflix.com"* ]]; then
         print_error "Netflix: IP 被屏蔽（重定向至限制页）"
     else
-        print_warning "Netflix: 重定向到未知页面: $(basename "$final_url" 2>/dev/null || echo "$final_url")"
+        print_warning "Netflix: 重定向到未知页面: $final_url"
     fi
 }
 check_disney() {
