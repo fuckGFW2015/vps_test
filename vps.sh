@@ -87,34 +87,36 @@ print_info "地理位置" "$GEO_INFO"
 print_title "【网络带宽测试】"
 
 install_speedtest_official() {
-    print_info "Speedtest CLI" "正在安装官方版本（Ookla）..."
+    print_info "Speedtest CLI" "正在下载官方静态二进制（兼容 Ubuntu 22.04.5）..."
 
-    # 确保有基本工具
+    # 确保有 curl
     if ! command -v curl >/dev/null; then
         if command -v apt >/dev/null 2>&1; then
             timeout 30 apt update >/dev/null 2>&1 && timeout 60 apt install -y curl ca-certificates
         fi
     fi
 
-    # 尝试添加仓库并安装
-    if command -v apt >/dev/null 2>&1; then
-        if curl -s https://install.speedtest.net/app/cli/install.deb.sh | sudo bash; then
-            if sudo apt install -y speedtest; then
-                if command -v speedtest >/dev/null; then
-                    print_success "Speedtest CLI 安装成功"
-                    return 0
-                fi
-            fi
+    # 创建目标目录
+    sudo mkdir -p /usr/local/bin
+
+    # 直接下载 x86_64 静态二进制（不依赖 apt 仓库）
+    if sudo curl -L https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-x86_64.tgz \
+        | sudo tar -xz -C /usr/local/bin --strip-components=1 speedtest; then
+        
+        sudo chmod +x /usr/local/bin/speedtest
+        
+        if command -v speedtest >/dev/null 2>&1; then
+            print_success "Speedtest CLI 安装成功（静态二进制版）"
+            return 0
         fi
     fi
 
-    print_error "Speedtest 安装失败，请手动运行："
-    print_info "安装命令" "curl -s https://install.speedtest.net/app/cli/install.deb.sh | sudo bash && sudo apt install -y speedtest"
+    print_error "Speedtest 静态二进制安装失败"
     return 1
 }
 
 run_speedtest() {
-    # 先检查是否已安装
+    # 先检查是否已安装（PATH 中包含 /usr/local/bin）
     if ! command -v speedtest >/dev/null 2>&1; then
         if ! install_speedtest_official; then
             return 1
