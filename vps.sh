@@ -1,10 +1,6 @@
 #!/bin/bash
-# vps-check-full-auto.sh
-# 特点：
-#   ✅ 自动安装 Speedtest CLI（如未安装）
-#   ✅ 精准测速（复现 ecs 脚本结果）
-#   ✅ 阿里云/腾讯云/RACKNERD 全兼容
-#   ✅ 保留原有 UI 与功能模块
+# vps-check-fixed.sh
+# 专为阿里云等环境优化：自动安装官方 Speedtest CLI，精准测速
 
 export LC_ALL=C
 
@@ -79,7 +75,7 @@ if [[ "$ORG_INFO" == "N/A" ]] && command -v whois >/dev/null; then
     fi
 fi
 
-if [[ "$PUBLIC_IP" =~ ^(47\.23[89]|47\.24[01]|47\.251|8\.21[01])\. ]] && [[ "$GEO_INFO" == *"N/A"* ]]; then
+if [[ "$PUBLIC_IP" =～ ^(47\.23[89]|47\.24[01]|47\.251|8\.21[01])\. ]] && [[ "$GEO_INFO" == *"N/A"* ]]; then
     GEO_INFO="Hong Kong (inferred from IP range)"
     ORG_INFO="Alibaba Cloud (AS45102)"
 fi
@@ -87,61 +83,40 @@ fi
 print_info "组织 (ASN)" "$ORG_INFO"
 print_info "地理位置" "$GEO_INFO"
 
-# ========== 网络带宽测试（自动安装 Speedtest CLI）==========
+# ========== 网络带宽测试（修复版：自动安装官方 speedtest）==========
 print_title "【网络带宽测试】"
 
-install_speedtest() {
-    if command -v speedtest >/dev/null 2>&1; then
-        return 0
+install_speedtest_official() {
+    print_info "Speedtest CLI" "正在安装官方版本（Ookla）..."
+
+    # 确保有基本工具
+    if ! command -v curl >/dev/null; then
+        if command -v apt >/dev/null 2>&1; then
+            timeout 30 apt update >/dev/null 2>&1 && timeout 60 apt install -y curl ca-certificates
+        fi
     fi
 
-    print_info "Speedtest CLI" "未检测到，正在自动安装..."
-    
-    # 检测系统类型
+    # 尝试添加仓库并安装
     if command -v apt >/dev/null 2>&1; then
-        # Ubuntu/Debian
-        if ! timeout 30 curl -s https://install.speedtest.net/app/cli/install.deb.sh | sudo bash >/dev/null 2>&1; then
-            print_error "Speedtest 安装失败（apt 系统）"
-            return 1
-        fi
-        if ! timeout 60 sudo apt install -y speedtest >/dev/null 2>&1; then
-            print_error "Speedtest 安装失败（apt install）"
-            return 1
-        fi
-    elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then
-        # CentOS/Rocky/AlmaLinux
-        if ! timeout 30 curl -s https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.rpm.sh | sudo bash >/dev/null 2>&1; then
-            print_error "Speedtest 仓库添加失败（yum/dnf 系统）"
-            return 1
-        fi
-        if command -v dnf >/dev/null 2>&1; then
-            if ! timeout 60 sudo dnf install -y speedtest >/dev/null 2>&1; then
-                print_error "Speedtest 安装失败（dnf）"
-                return 1
-            fi
-        else
-            if ! timeout 60 sudo yum install -y speedtest >/dev/null 2>&1; then
-                print_error "Speedtest 安装失败（yum）"
-                return 1
+        if curl -s https://install.speedtest.net/app/cli/install.deb.sh | sudo bash; then
+            if sudo apt install -y speedtest; then
+                if command -v speedtest >/dev/null; then
+                    print_success "Speedtest CLI 安装成功"
+                    return 0
+                fi
             fi
         fi
-    else
-        print_warning "不支持的包管理器，跳过安装"
-        return 1
     fi
 
-    if command -v speedtest >/dev/null 2>&1; then
-        print_success "Speedtest CLI 安装成功"
-        return 0
-    else
-        print_error "Speedtest 安装完成但无法调用"
-        return 1
-    fi
+    print_error "Speedtest 安装失败，请手动运行："
+    print_info "安装命令" "curl -s https://install.speedtest.net/app/cli/install.deb.sh | sudo bash && sudo apt install -y speedtest"
+    return 1
 }
 
 run_speedtest() {
+    # 先检查是否已安装
     if ! command -v speedtest >/dev/null 2>&1; then
-        if ! install_speedtest; then
+        if ! install_speedtest_official; then
             return 1
         fi
     fi
@@ -168,18 +143,18 @@ run_speedtest() {
         fi
         return 0
     else
-        print_error "Speedtest 执行失败或无有效输出"
+        print_error "Speedtest 执行无有效输出"
         return 1
     fi
 }
 
-# 执行测速（自动安装 + 运行）
+# 执行测速
 if ! run_speedtest; then
-    print_warning "Speedtest 测速失败，尝试本地镜像验证网络连通性"
-    if timeout 5 curl -sf http://mirrors.aliyun.com/ubuntu/ls-lR.gz > /dev/null 2>&1; then
-        print_success "阿里云镜像: 可访问（说明出站网络正常）"
+    print_warning "回退：测试阿里云本地镜像连通性"
+    if timeout 5 curl -sfI http://mirrors.aliyun.com/ubuntu/ > /dev/null 2>&1; then
+        print_success "阿里云镜像: 可访问（网络出站正常）"
     else
-        print_error "本地镜像也无法访问，可能存在网络限制"
+        print_error "阿里云镜像也无法访问，可能存在网络限制"
     fi
 fi
 
