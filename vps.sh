@@ -37,6 +37,44 @@ print_info "虚拟化" "$(systemd-detect-virt 2>/dev/null || echo "未知")"
 LOCAL_IP=$(ip route get 8.8.8.8 2>/dev/null | awk 'NR==1{print $7}' || echo "N/A")
 PUBLIC_IP=$(timeout 5 curl -s https://ifconfig.me 2>/dev/null || timeout 5 wget -qO- https://ifconfig.me 2>/dev/null || echo "N/A")
 
+# ========== 内存 & 硬盘 & CPU ==========
+print_title "【硬件资源概览】"
+
+# --- 内存 ---
+if command -v free >/dev/null; then
+    mem_total=$(free -m | awk 'NR==2{printf "%.1f", $2/1024}')
+    mem_used=$(free -m | awk 'NR==2{printf "%.1f", $3/1024}')
+    mem_avail=$(free -m | awk 'NR==2{printf "%.1f", $7/1024}')
+    swap_total=$(free -m | awk 'NR==3{printf "%.1f", $2/1024}')
+    swap_used=$(free -m | awk 'NR==3{printf "%.1f", $3/1024}')
+    
+    print_info "内存 (RAM)" "${mem_used} GiB / ${mem_total} GiB (可用: ${mem_avail} GiB)"
+    
+    # 安全判断 Swap 是否 > 0（无需 bc）
+    if (( $(awk "BEGIN {print ($swap_total > 0)}") )); then
+        print_info "Swap" "${swap_used} GiB / ${swap_total} GiB"
+    fi
+else
+    print_info "内存" "N/A (free 命令不可用)"
+fi
+
+# --- CPU 核心数 ---
+cpu_cores=$(nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo "N/A")
+print_info "CPU 核心数" "$cpu_cores"
+
+# --- 硬盘（根分区）---
+if command -v df >/dev/null; then
+    root_fs=$(df -T / | awk 'NR==2{print $2}')
+    root_size=$(df -h / | awk 'NR==2{print $2}')
+    root_used=$(df -h / | awk 'NR==2{print $3}')
+    root_avail=$(df -h / | awk 'NR==2{print $4}')
+    root_use_pct=$(df -h / | awk 'NR==2{print $5}')
+    print_info "硬盘 (/)" "${root_used} / ${root_size} (${root_use_pct} used, ${root_fs})"
+else
+    print_info "硬盘" "N/A (df 命令不可用)"
+fi
+
+# IP 信息放回原位
 print_info "内网 IPv4" "$LOCAL_IP"
 print_info "公网 IPv4" "$PUBLIC_IP"
 
