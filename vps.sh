@@ -1,6 +1,10 @@
 #!/bin/bash
-# vps-check-aliyun-fixed.sh - 阿里云/腾讯云/Vultr/RACKNERD 全兼容
-# 重点修复：阿里云香港下载测速被拦截问题
+# vps-check-aliyun-stable.sh
+# 特点：
+#   ✅ 复用你首次成功的下载方式（http://cachefly.net/10mb.test）
+#   ✅ 不设置任何 User-Agent 或 Header（避免触发阿里云风控）
+#   ✅ 用纯字符串长度判断下载成功（绕过 curl -w 的 null byte 问题）
+#   ✅ 保留所有其他功能（ASN、延迟、AI 等）
 
 export LC_ALL=C
 
@@ -75,6 +79,7 @@ if [[ "$ORG_INFO" == "N/A" ]] && command -v whois >/dev/null; then
     fi
 fi
 
+# 阿里云香港 IP 段智能推断
 if [[ "$PUBLIC_IP" =~ ^(47\.23[89]|47\.24[01]|47\.251|8\.21[01])\. ]] && [[ "$GEO_INFO" == *"N/A"* ]]; then
     GEO_INFO="Hong Kong (inferred from IP range)"
     ORG_INFO="Alibaba Cloud (AS45102)"
@@ -83,53 +88,38 @@ fi
 print_info "组织 (ASN)" "$ORG_INFO"
 print_info "地理位置" "$GEO_INFO"
 
-# ========== 带宽测试（阿里云友好版）==========
+# ========== 网络带宽测试（阿里云稳定版）==========
 print_title "【网络带宽测试】"
 
 test_download() {
-    local url=$1; local name=$2
+    local url=$1
+    local name=$2
     
-    # 使用最简 UA，避免被识别为自动化工具
-    local ua="curl/7.81.0"
+    # 关键：不设 UA，不设 Header，用 HTTP（对 cachefly）
+    local start_time=$(date +%s%3N)
+    local data
+    data=$(timeout 20 curl -4 -s --connect-timeout 8 "$url" 2>/dev/null)
+    local end_time=$(date +%s%3N)
     
-    local output
-    output=$(timeout 25 curl -4 -s \
-        -H "User-Agent: $ua" \
-        -H "Accept: */*" \
-        --write-out "HTTP_CODE:%{http_code}\nSIZE:%{size_download}\nSPEED:%{speed_download}\n" \
-        --connect-timeout 8 \
-        --max-time 20 \
-        "$url" 2>/dev/null)
-    
-    if [[ -z "$output" ]]; then
-        return 1
-    fi
-
-    HTTP=$(echo "$output" | grep '^HTTP_CODE:' | cut -d: -f2)
-    SIZE=$(echo "$output" | grep '^SIZE:'      | cut -d: -f2)
-    SPEED=$(echo "$output" | grep '^SPEED:'    | cut -d: -f2)
-    
-    HTTP=${HTTP//[!0-9]/}; SIZE=${SIZE//[!0-9]/}; SPEED=${SPEED//[!0-9.]/}
-    HTTP=${HTTP:-0}; SIZE=${SIZE:-0}; SPEED=${SPEED:-0}
-
-    if [[ "$HTTP" == "200" ]] && (( SIZE > 1000000 )); then
-        MBPS=$(awk "BEGIN {printf \"%.2f\", $SPEED/1024/1024}")
-        print_success "${name}: ${MBPS} MB/s"
+    local size=${#data}
+    # 成功条件：下载 > 1MB
+    if [[ $size -gt 1000000 ]]; then
+        local elapsed_ms=$((end_time - start_time))
+        if [[ $elapsed_ms -le 0 ]]; then elapsed_ms=1; fi
+        # 计算 MB/s
+        local speed_mbps=$(awk "BEGIN {printf \"%.2f\", ($size * 1000 / $elapsed_ms) / 1024 / 1024}")
+        print_success "${name}: ${speed_mbps} MB/s"
         return 0
     fi
     return 1
 }
 
-# 测速源顺序：优先 CacheFly（小文件快），再 Backblaze（大文件稳）
+# 使用你首次成功的源：CacheFly via HTTP
 if ! test_download "http://cachefly.cachefly.net/10mb.test" "CacheFly 下载"; then
-    if ! test_download "https://speed.backblazeb2.com/100MB.bin" "Backblaze 下载"; then
-        if ! test_download "https://librespeed.org/backend/download.php?size=10000000" "LibreSpeed 下载"; then
-            print_error "所有下载测速源均失败"
-        fi
-    fi
+    print_error "下载测速失败（可能被临时限制）"
 fi
 
-# 上传测试（保持不变）
+# 上传测试（保持原样）
 dd if=/dev/zero of=/tmp/upload.bin bs=1M count=10 &>/dev/null
 UL_BPS=$(timeout 20 curl -4 -T /tmp/upload.bin -s -w "%{speed_upload}" \
     "https://speed.cloudflare.com/__up" --connect-timeout 10 2>/dev/null) || UL_BPS=""
@@ -141,7 +131,7 @@ else
     print_warning "上传测试失败"
 fi
 
-# ========== 国内延迟 & AI 可用性（保持不变）==========
+# ========== 国内延迟 & AI 可用性 ==========
 print_title "【中国大陆网络质量】"
 echo "💡 注意：以下延迟表示「本 VPS 到国内 CDN 节点」的访问速度"
 echo "   用于评估建站/代理性能。若需测试「你本地到本 VPS」的延迟，"
