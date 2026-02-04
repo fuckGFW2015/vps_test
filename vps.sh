@@ -1,11 +1,7 @@
 #!/bin/bash
-# safe-ecs-pro.sh - 终极安全版 VPS 检测脚本（支持带宽、延迟、AI、ASN）
+# vps.sh - 终极安全版 VPS 检测脚本（默认全功能）
 # 作者：stephchow
-# 特点：
-#   ✅ 所有外联均为可信公共服务（Cloudflare / ipinfo.io / 国内镜像站）
-#   ✅ HTTPS 加密，无数据上传，无统计，无分享
-#   ✅ 支持 -speed -latency -ai -asn 全功能
-#   ✅ 自动美化输出，关键结果高亮
+# 特点：无参数时自动启用全部功能；所有外联均为可信服务；彩色输出
 
 set -euo pipefail
 
@@ -31,33 +27,34 @@ print_error() {
     echo -e "❌ \033[1;31m$1\033[0m"
 }
 
-# === 参数解析 ===
-ENABLE_SPEED=false
-ENABLE_LATENCY=false
-ENABLE_AI=false
-ENABLE_ASN=false
+# === 参数解析：默认全开 ===
+ENABLE_SPEED=true
+ENABLE_LATENCY=true
+ENABLE_AI=true
+ENABLE_ASN=true
 
-if [[ $# -eq 0 ]]; then
-    ENABLE_SPEED=true
-    ENABLE_LATENCY=true
-    ENABLE_AI=true
-    ENABLE_ASN=true
-    print_info "提示" "未指定参数，启用全部功能（-speed -latency -ai -asn）"
+# 如果传入了任意参数，则重置为 false，再按需开启
+if [[ $# -gt 0 ]]; then
+    ENABLE_SPEED=false
+    ENABLE_LATENCY=false
+    ENABLE_AI=false
+    ENABLE_ASN=false
+
+    for arg in "$@"; do
+        case $arg in
+            -speed)     ENABLE_SPEED=true ;;
+            -latency)   ENABLE_LATENCY=true ;;
+            -ai)        ENABLE_AI=true ;;
+            -asn)       ENABLE_ASN=true ;;
+            *)
+                echo "未知参数: $arg"
+                echo "用法: $0 [可选: -speed -latency -ai -asn]"
+                echo "💡 不加参数 = 启用全部功能"
+                exit 1
+                ;;
+        esac
+    done
 fi
-
-for arg in "$@"; do
-    case $arg in
-        -speed)     ENABLE_SPEED=true ;;
-        -latency)   ENABLE_LATENCY=true ;;
-        -ai)        ENABLE_AI=true ;;
-        -asn)       ENABLE_ASN=true ;;
-        *) 
-            echo "未知参数: $arg"
-            echo "用法: $0 [-speed] [-latency] [-ai] [-asn]"
-            exit 1
-            ;;
-    esac
-done
 
 # === 基础系统信息 ===
 print_title "【系统基本信息】"
@@ -96,7 +93,6 @@ if $ENABLE_SPEED; then
         print_title "【网络带宽测试】"
         echo "🌐 测速源: Cloudflare 官方 (https://speed.cloudflare.com)"
 
-        # 下载 100MB
         DL_BPS=$(curl -4 -o /dev/null -s -w "%{speed_download}" \
             "https://speed.cloudflare.com/__down?bytes=104857600" --connect-timeout 10 2>/dev/null) || DL_BPS=""
         if [[ -n "$DL_BPS" && "$DL_BPS" != "0" ]]; then
@@ -106,7 +102,6 @@ if $ENABLE_SPEED; then
             print_error "下载测试失败"
         fi
 
-        # 上传 10MB
         dd if=/dev/zero of=/tmp/upload.bin bs=1M count=10 &>/dev/null
         UL_BPS=$(curl -4 -T /tmp/upload.bin -s -w "%{speed_upload}" \
             "https://speed.cloudflare.com/__up" --connect-timeout 10 2>/dev/null) || UL_BPS=""
@@ -120,7 +115,7 @@ if $ENABLE_SPEED; then
     fi
 fi
 
-# === 中国大陆多地区延迟 + 带宽（可选增强）===
+# === 中国大陆多地区延迟 ===
 if $ENABLE_LATENCY; then
     print_title "【中国大陆网络质量】"
     echo "（延迟单位：ms；速率单位：MB/s）"
@@ -137,37 +132,15 @@ if $ENABLE_LATENCY; then
         host="${NODES[$region]}"
         printf "%-8s → " "$region"
 
-        # 延迟测试（优先 ping，否则 HTTPS）
         if timeout 3 ping -c1 -W2 "$host" &>/dev/null; then
             latency=$(ping -c1 -W2 "$host" 2>/dev/null | grep 'time=' | awk -F'time=' '{print $2}' | cut -d' ' -f1)
-            printf "%6.1f ms | " "$latency"
+            printf "%6.1f ms" "$latency"
         else
             latency_ms=$(curl -so /dev/null -w "%{time_total*1000}" --connect-timeout 3 "https://$host" 2>/dev/null)
             if [[ $? -eq 0 && "$latency_ms" != "0.000" ]]; then
-                printf "%6.1f ms | " "$latency_ms"
+                printf "%6.1f ms" "$latency_ms"
             else
-                printf "%8s | " "超时"
-                continue
-            fi
-        fi
-
-        # 下载速率测试（10MB）
-        speed_bps=$(curl -s -o /dev/null -w "%{speed_download}" --connect-timeout 8 "https://$host/test_10mb.bin" 2>/dev/null) || speed_bps=""
-        if [[ -n "$speed_bps" && "$speed_bps" != "0" ]]; then
-            speed_mbs=$(awk "BEGIN {printf \"%.1f\", $speed_bps/1024/1024}")
-            printf "%6.1f MB/s" "$speed_mbs"
-        else
-            # 备用：使用阿里云 100MB 文件（仅北京）
-            if [[ "$region" == "北京" ]]; then
-                speed_bps=$(curl -s -o /dev/null -w "%{speed_download}" --connect-timeout 8 "https://mirrors.aliyun.com/100mb.test" 2>/dev/null)
-                if [[ -n "$speed_bps" && "$speed_bps" != "0" ]]; then
-                    speed_mbs=$(awk "BEGIN {printf \"%.1f\", $speed_bps/1024/1024}")
-                    printf "%6.1f MB/s" "$speed_mbs"
-                else
-                    printf "%10s" "N/A"
-                fi
-            else
-                printf "%10s" "N/A"
+                printf "%8s" "超时"
             fi
         fi
         echo
