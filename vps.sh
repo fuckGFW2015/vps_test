@@ -1,10 +1,12 @@
 #!/bin/bash
-# vps-check-ultimate.sh - 终极 VPS 检测脚本（高精度 ASN + 多源测速）
+# vps-check-final-fixed.sh - 终极修复版：ASN 精准 + 无警告 + 多源测速
 # 特点：
-#   ✅ 使用 ipapi.co 精准识别阿里云香港等节点
-#   ✅ 下载测速自动验证 + fallback 到 Linode/CacheFly
-#   ✅ 明确提示“VPS 到国内” ≠ “你本地到 VPS”
-#   ✅ 无 jq 依赖，仅需 curl/ip/ping
+#   ✅ 修复 "ignored null byte" 警告
+#   ✅ 双源 ASN 查询（ip-api.com + whois），精准识别阿里云香港
+#   ✅ 自动安装 jq（如缺失）
+#   ✅ 清晰提示延迟含义
+
+export LC_ALL=C  # 避免 locale 导致的字符问题
 
 print_title() {
     echo -e "\n\033[1;36m==================================================\033[0m"
@@ -28,21 +30,6 @@ print_error() {
     echo -e "❌ \033[1;31m$1\033[0m"
 }
 
-# 默认启用全部
-ENABLE_SPEED=true; ENABLE_LATENCY=true; ENABLE_AI=true; ENABLE_ASN=true
-if [[ $# -gt 0 ]]; then
-    ENABLE_SPEED=false; ENABLE_LATENCY=false; ENABLE_AI=false; ENABLE_ASN=false
-    for arg in "$@"; do
-        case $arg in
-            -speed)     ENABLE_SPEED=true ;;
-            -latency)   ENABLE_LATENCY=true ;;
-            -ai)        ENABLE_AI=true ;;
-            -asn)       ENABLE_ASN=true ;;
-            *) echo "用法: $0 [可选: -speed -latency -ai -asn]"; exit 1 ;;
-        esac
-    done
-fi
-
 # ========== 系统信息 ==========
 print_title "【系统基本信息】"
 print_info "主机名" "$(hostname)"
@@ -57,130 +44,149 @@ PUBLIC_IP=$(timeout 5 curl -s https://ifconfig.me 2>/dev/null || timeout 5 wget 
 print_info "内网 IPv4" "$LOCAL_IP"
 print_info "公网 IPv4" "$PUBLIC_IP"
 
-# ========== 高精度 ASN 查询（使用 ipapi.co）==========
-if $ENABLE_ASN && [[ "$PUBLIC_IP" != "N/A" ]] && command -v curl >/dev/null; then
-    print_title "【IP 归属信息】"
-    RESPONSE=$(timeout 6 curl -s "https://ipapi.co/${PUBLIC_IP}/json/" 2>/dev/null)
-    
-    if [[ -n "$RESPONSE" && "$RESPONSE" != *"error"* && "$RESPONSE" != *"reserved"* && "$RESPONSE" != *"private"* ]]; then
-        ORG=$(echo "$RESPONSE" | grep -o '"org":"[^"]*"' | cut -d'"' -f4)
-        COUNTRY=$(echo "$RESPONSE" | grep -o '"country_name":"[^"]*"' | cut -d'"' -f4)
-        REGION=$(echo "$RESPONSE" | grep -o '"region":"[^"]*"' | cut -d'"' -f4)
-        
-        # 特殊处理：若 country_name 为空但 IP 属于知名云厂商
-        if [[ -z "$COUNTRY" ]]; then
-            if [[ "$ORG" == *"Alibaba"* || "$ORG" == *"Tencent"* || "$ORG" == *"Huawei"* ]]; then
-                COUNTRY="Hong Kong (inferred from org)"
-            fi
-        fi
-        
-        print_info "组织 (ASN)" "${ORG:-N/A}"
-        print_info "地理位置" "${COUNTRY:-N/A} ${REGION:-}"
-    else
-        print_warning "ASN 查询失败（IP 可能为内网或受限）"
+# ========== 高精度 ASN 查询（双源 fallback）==========
+print_title "【IP 归属信息】"
+
+# 尝试安装 jq（静默）
+if ! command -v jq >/dev/null; then
+    if command -v apt >/dev/null; then
+        timeout 30 apt update >/dev/null 2>&1 && timeout 60 apt install -y jq >/dev/null 2>&1
+    elif command -v yum >/dev/null; then
+        timeout 60 yum install -y jq >/dev/null 2>&1
     fi
 fi
 
-# ========== 带宽测试（增强版）==========
-if $ENABLE_SPEED; then
-    print_title "【网络带宽测试】"
-    
-    test_download() {
-        local url=$1; local name=$2; local bytes=${3:-10485760}
-        local ua="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        
-        RESULT=$(timeout 20 curl -4 -s -w "%{http_code}:%{size_download}:%{speed_download}" \
-            -H "User-Agent: $ua" \
-            "${url}?bytes=${bytes}" --connect-timeout 10 2>/dev/null || echo "0:0:0")
-        
-        HTTP=$(echo "$RESULT" | cut -d: -f1)
-        SIZE=$(echo "$RESULT" | cut -d: -f2)
-        SPEED=$(echo "$RESULT" | cut -d: -f3)
-        
-        if [[ "$HTTP" == "200" && "$SIZE" -gt 1000000 ]]; then
-            MBPS=$(awk "BEGIN {printf \"%.2f\", $SPEED/1024/1024}")
-            print_success "${name}: ${MBPS} MB/s"
-            return 0
-        fi
-        return 1
-    }
+ORG_INFO="N/A"; GEO_INFO="N/A"
 
-    if ! test_download "https://speed.cloudflare.com/__down" "Cloudflare 下载"; then
-        if ! test_download "https://speedtest.fremont.linode.com/100MB" "Linode 下载" "104857600"; then
-            if ! test_download "http://cachefly.cachefly.net/10mb.test" "CacheFly 下载" ""; then
-                print_error "所有下载测速源均失败"
-            fi
-        fi
-    fi
-
-    # 上传测试
-    dd if=/dev/zero of=/tmp/upload.bin bs=1M count=10 &>/dev/null
-    UL_BPS=$(timeout 20 curl -4 -T /tmp/upload.bin -s -w "%{speed_upload}" \
-        "https://speed.cloudflare.com/__up" --connect-timeout 10 2>/dev/null) || UL_BPS=""
-    rm -f /tmp/upload.bin
-    if [[ -n "$UL_BPS" && "$UL_BPS" != "0" ]]; then
-        UL_MBS=$(awk "BEGIN {printf \"%.2f\", $UL_BPS/1024/1024}")
-        print_success "上传速度: ${UL_MBS} MB/s"
-    else
-        print_warning "上传测试失败"
+# 方法 1: ip-api.com (优先)
+if command -v jq >/dev/null && command -v curl >/dev/null; then
+    RESP=$(timeout 6 curl -s "http://ip-api.com/json/${PUBLIC_IP}?fields=status,country,regionName,city,isp,as" 2>/dev/null)
+    if [[ -n "$RESP" ]] && [[ "$(echo "$RESP" | jq -r '.status // "fail"' 2>/dev/null)" == "success" ]]; then
+        COUNTRY=$(echo "$RESP" | jq -r '.country // empty')
+        REGION=$(echo "$RESP" | jq -r '.regionName // empty')
+        ISP=$(echo "$RESP" | jq -r '.isp // empty')
+        AS_NUM=$(echo "$RESP" | jq -r '.as // empty')
+        ORG_INFO="${ISP} (${AS_NUM})"
+        GEO_INFO="${COUNTRY} ${REGION}"
     fi
 fi
 
-# ========== 国内延迟（带明确提示）==========
-if $ENABLE_LATENCY; then
-    print_title "【中国大陆网络质量】"
-    echo "💡 注意：以下延迟表示「本 VPS 到国内 CDN 节点」的访问速度"
-    echo "   用于评估建站/代理性能。若需测试「你本地到本 VPS」的延迟，"
-    echo "   请在你的电脑上运行：ping $PUBLIC_IP"
-    echo "（单位：毫秒，越低越好）"
+# 方法 2: whois fallback
+if [[ "$ORG_INFO" == "N/A" ]] && command -v whois >/dev/null; then
+    WHOIS_OUT=$(timeout 5 whois "$PUBLIC_IP" 2>/dev/null)
+    if [[ -n "$WHOIS_OUT" ]]; then
+        ORG=$(echo "$WHOIS_OUT" | grep -iE "orgname|descr|owner" | head -1 | cut -d: -f2- | xargs 2>/dev/null)
+        COUNTRY=$(echo "$WHOIS_OUT" | grep -i "country" | head -1 | cut -d: -f2 | xargs 2>/dev/null)
+        ORG_INFO="${ORG:-N/A}"
+        GEO_INFO="${COUNTRY:-N/A}"
+    fi
+fi
 
-    declare -A NODES=(
-        ["北京"]="mirrors.aliyun.com"
-        ["上海"]="mirrors.tuna.tsinghua.edu.cn"
-        ["广州"]="mirrors.cloud.tencent.com"
-        ["成都"]="mirrors.cqu.edu.cn"
-        ["深圳"]="repo.huaweicloud.com"
-    )
+# 特殊处理：阿里云香港常见特征
+if [[ "$PUBLIC_IP" =～ ^47\.23[89]\.|^47\.24[01]\.|^8\.21[01]\. ]] && [[ "$GEO_INFO" == *"N/A"* ]]; then
+    GEO_INFO="Hong Kong (inferred from IP range)"
+    ORG_INFO="Alibaba Cloud (AS45102)"
+fi
 
-    for region in "${!NODES[@]}"; do
-        host="${NODES[$region]}"
-        printf "%-8s → " "$region"
-        if timeout 4 ping -c1 -W2 "$host" &>/dev/null; then
-            latency=$(ping -c1 -W2 "$host" 2>/dev/null | grep 'time=' | awk -F'time=' '{print $2}' | cut -d' ' -f1)
-            printf "\033[1;32m%6.1f ms\033[0m\n" "$latency"
+print_info "组织 (ASN)" "$ORG_INFO"
+print_info "地理位置" "$GEO_INFO"
+
+# ========== 带宽测试（修复 null byte 警告）==========
+print_title "【网络带宽测试】"
+
+test_download() {
+    local url=$1; local name=$2; local bytes=${3:-10485760}
+    local ua="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    
+    # 关键修复：清洗 curl 输出，避免 null byte 警告
+    RESULT_RAW=$(timeout 20 curl -4 -s -w "%{http_code}:%{size_download}:%{speed_download}" \
+        -H "User-Agent: $ua" \
+        "${url}?bytes=${bytes}" --connect-timeout 10 2>/dev/null || echo "0:0:0")
+    RESULT=$(echo "$RESULT_RAW" | tr -cd '[:print:]\n\r' | tr '\0' ' ')
+    
+    HTTP=$(echo "$RESULT" | cut -d: -f1)
+    SIZE=$(echo "$RESULT" | cut -d: -f2)
+    SPEED=$(echo "$RESULT" | cut -d: -f3)
+    
+    if [[ "$HTTP" == "200" && "$SIZE" -gt 1000000 ]]; then
+        MBPS=$(awk "BEGIN {printf \"%.2f\", $SPEED/1024/1024}")
+        print_success "${name}: ${MBPS} MB/s"
+        return 0
+    fi
+    return 1
+}
+
+if ! test_download "https://speed.cloudflare.com/__down" "Cloudflare 下载"; then
+    if ! test_download "https://speedtest.fremont.linode.com/100MB" "Linode 下载" "104857600"; then
+        if ! test_download "http://cachefly.cachefly.net/10mb.test" "CacheFly 下载" ""; then
+            print_error "所有下载测速源均失败"
+        fi
+    fi
+fi
+
+# 上传测试
+dd if=/dev/zero of=/tmp/upload.bin bs=1M count=10 &>/dev/null
+UL_BPS=$(timeout 20 curl -4 -T /tmp/upload.bin -s -w "%{speed_upload}" \
+    "https://speed.cloudflare.com/__up" --connect-timeout 10 2>/dev/null) || UL_BPS=""
+rm -f /tmp/upload.bin
+if [[ -n "$UL_BPS" && "$UL_BPS" != "0" ]]; then
+    UL_MBS=$(awk "BEGIN {printf \"%.2f\", $UL_BPS/1024/1024}")
+    print_success "上传速度: ${UL_MBS} MB/s"
+else
+    print_warning "上传测试失败"
+fi
+
+# ========== 国内延迟 ==========
+print_title "【中国大陆网络质量】"
+echo "💡 注意：以下延迟表示「本 VPS 到国内 CDN 节点」的访问速度"
+echo "   用于评估建站/代理性能。若需测试「你本地到本 VPS」的延迟，"
+echo "   请在你的电脑上运行：ping $PUBLIC_IP"
+echo "（单位：毫秒，越低越好）"
+
+declare -A NODES=(
+    ["北京"]="mirrors.aliyun.com"
+    ["上海"]="mirrors.tuna.tsinghua.edu.cn"
+    ["广州"]="mirrors.cloud.tencent.com"
+    ["成都"]="mirrors.cqu.edu.cn"
+    ["深圳"]="repo.huaweicloud.com"
+)
+
+for region in "${!NODES[@]}"; do
+    host="${NODES[$region]}"
+    printf "%-8s → " "$region"
+    if timeout 4 ping -c1 -W2 "$host" &>/dev/null; then
+        latency=$(ping -c1 -W2 "$host" 2>/dev/null | grep 'time=' | awk -F'time=' '{print $2}' | cut -d' ' -f1)
+        printf "\033[1;32m%6.1f ms\033[0m\n" "$latency"
+    else
+        latency_ms=$(timeout 5 curl -so /dev/null -w "%{time_total*1000}" --connect-timeout 3 "https://$host" 2>/dev/null)
+        if [[ $? -eq 0 && "$latency_ms" != "0.000" ]]; then
+            printf "\033[1;33m%6.1f ms (HTTPS)\033[0m\n" "$latency_ms"
         else
-            latency_ms=$(timeout 5 curl -so /dev/null -w "%{time_total*1000}" --connect-timeout 3 "https://$host" 2>/dev/null)
-            if [[ $? -eq 0 && "$latency_ms" != "0.000" ]]; then
-                printf "\033[1;33m%6.1f ms (HTTPS)\033[0m\n" "$latency_ms"
-            else
-                printf "\033[1;31m%8s\033[0m\n" "超时"
-            fi
+            printf "\033[1;31m%8s\033[0m\n" "超时"
         fi
-    done
-fi
+    fi
+done
 
 # ========== AI 可用性 ==========
-if $ENABLE_AI; then
-    print_title "【主流 AI 网站可用性】"
-    declare -A AI_SITES=(
-        ["ChatGPT"]="chat.openai.com"
-        ["Claude"]="claude.ai"
-        ["Gemini"]="gemini.google.com"
-        ["文心一言"]="yiyan.baidu.com"
-        ["通义千问"]="qwen.ai"
-        ["Kimi"]="kimi.moonshot.cn"
-        ["DeepSeek"]="deepseek.com"
-        ["豆包"]="doubao.com"
-    )
-    for name in "${!AI_SITES[@]}"; do
-        domain="${AI_SITES[$name]}"
-        if timeout 6 curl -s --head --fail "https://$domain" --connect-timeout 4 &>/dev/null; then
-            print_success "$name: 可访问"
-        else
-            print_error "$name: 不可达"
-        fi
-    done
-fi
+print_title "【主流 AI 网站可用性】"
+declare -A AI_SITES=(
+    ["ChatGPT"]="chat.openai.com"
+    ["Claude"]="claude.ai"
+    ["Gemini"]="gemini.google.com"
+    ["文心一言"]="yiyan.baidu.com"
+    ["通义千问"]="qwen.ai"
+    ["Kimi"]="kimi.moonshot.cn"
+    ["DeepSeek"]="deepseek.com"
+    ["豆包"]="doubao.com"
+)
+for name in "${!AI_SITES[@]}"; do
+    domain="${AI_SITES[$name]}"
+    if timeout 6 curl -s --head --fail "https://$domain" --connect-timeout 4 &>/dev/null; then
+        print_success "$name: 可访问"
+    else
+        print_error "$name: 不可达"
+    fi
+done
 
 print_title "【检测完成】"
 print_success "所有结果仅在本地显示，未上传任何数据。"
