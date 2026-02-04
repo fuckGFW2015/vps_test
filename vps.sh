@@ -267,17 +267,22 @@ echo "   注意：部分平台（如 Disney+）可能因 IP 信誉动态封锁�
 
 check_netflix() {
     local url="https://www.netflix.com/title/80018499"
-    local final_url=$(timeout 6 curl -sL -o /dev/null -w "%{url_effective}" --connect-timeout 4 "$url" 2>/dev/null)
+    local final_url=$(timeout 7 curl -sL -o /dev/null -w "%{url_effective}" --connect-timeout 4 "$url" 2>/dev/null)
     
     if [[ "$final_url" == *"title/80018499"* ]]; then
-        print_success "Netflix: 原生解锁（可看自制剧）"
+        # 关键：获取页面内容并检查是否真有播放器
+        local content=$(timeout 7 curl -sL --connect-timeout 4 "$url" 2>/dev/null)
+        if [[ "$content" == *"VideoPlayer"* ]] || [[ "$content" == *"\"availabilityDate\""* ]]; then
+            print_success "Netflix: 原生解锁（可看自制剧）"
+        else
+            print_error "Netflix: 页面可访问但无播放权限（区域限制）"
+        fi
     elif [[ "$final_url" == *"login"* ]] || [[ "$final_url" == *"notavailable"* ]] || [[ "$final_url" == *"help.netflix.com"* ]]; then
         print_error "Netflix: IP 被屏蔽（重定向至限制页）"
     else
-        print_warning "Netflix: 重定向到未知页面: $final_url"
+        print_warning "Netflix: 重定向到未知页面: $(basename "$final_url" 2>/dev/null || echo "$final_url")"
     fi
 }
-
 check_disney() {
     local resp=$(timeout 8 curl -s --connect-timeout 5 -I "https://www.disneyplus.com/" 2>/dev/null)
     if echo "$resp" | grep -q "302\|301" && echo "$resp" | grep -qi "location.*disney"; then
