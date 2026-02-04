@@ -260,6 +260,57 @@ for name in "${!AI_SITES[@]}"; do
         print_error "$name: 不可达"
     fi
 done
+# ========== 流媒体解锁检测 ==========
+print_title "【流媒体解锁状态】"
+echo "💡 检测原理：通过访问各平台特定页面，判断是否返回区域限制或正常内容"
+echo "   注意：部分平台（如 Disney+）可能因 IP 信誉动态封锁，结果仅供参考"
 
+check_netflix() {
+    local result=$(timeout 8 curl -s --connect-timeout 5 -H "Accept: application/json" \
+        "https://www.netflix.com/title/80018499" 2>/dev/null)
+    
+    if [[ "$result" == *"geo"* ]] || [[ "$result" == *"not available"* ]] || [[ "$result" == *"VideoPlayer"* ]]; then
+        # 返回视频页 → 解锁
+        print_success "Netflix: 原生解锁（可看自制剧）"
+    elif [[ "$result" == *"location"* ]] || [[ "$result" == *"not in service"* ]]; then
+        print_error "Netflix: 未解锁（仅限本地内容）"
+    else
+        # 无法判断（如 403/503）
+        print_warning "Netflix: 未知状态（可能被屏蔽）"
+    fi
+}
+
+check_disney() {
+    local resp=$(timeout 8 curl -s --connect-timeout 5 -I "https://www.disneyplus.com/" 2>/dev/null)
+    if echo "$resp" | grep -q "302\|301" && echo "$resp" | grep -qi "location.*disney"; then
+        # 正常跳转 → 可能解锁
+        local content=$(timeout 8 curl -s --connect-timeout 5 "https://www.disneyplus.com/" 2>/dev/null)
+        if [[ "$content" == *"video"* ]] || [[ "$content" == *"bundle"* ]]; then
+            print_success "Disney+: 可能已解锁"
+        else
+            print_error "Disney+: 未解锁（跳转至区域页）"
+        fi
+    elif echo "$resp" | grep -q "403\|404\|503"; then
+        print_error "Disney+: 完全屏蔽（IP 被拉黑）"
+    else
+        print_warning "Disney+: 未知状态"
+    fi
+}
+
+check_youtube_premium() {
+    local resp=$(timeout 8 curl -s --connect-timeout 5 "https://www.youtube.com/premium" 2>/dev/null)
+    if [[ "$resp" == *"family"* ]] || [[ "$resp" == *"membership"* ]]; then
+        print_success "YouTube Premium: 可访问（可能支持订阅）"
+    elif [[ "$resp" == *"unavailable"* ]] || [[ "$resp" == *"not available"* ]]; then
+        print_error "YouTube Premium: 区域限制"
+    else
+        print_warning "YouTube Premium: 未知状态"
+    fi
+}
+
+# 执行检测
+check_netflix
+check_disney
+check_youtube_premium
 print_title "【检测完成】"
 print_success "所有结果仅在本地显示，未上传任何数据。"
