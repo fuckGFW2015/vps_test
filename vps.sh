@@ -1,10 +1,6 @@
 #!/bin/bash
-# vps-check-perfect.sh - 终极 VPS 检测脚本（无警告 + 高精度 ASN + 多源测速）
-# 特点：
-#   ✅ 彻底消除 "ignored null byte" 警告
-#   ✅ 双源 ASN 查询 + 阿里云香港 IP 段智能推断
-#   ✅ 自动安装 jq（静默）
-#   ✅ 清晰区分“VPS 出口” vs “你本地到 VPS”
+# vps-check-aliyun-fixed.sh - 阿里云/腾讯云/Vultr/RACKNERD 全兼容
+# 重点修复：阿里云香港下载测速被拦截问题
 
 export LC_ALL=C
 
@@ -47,7 +43,6 @@ print_info "公网 IPv4" "$PUBLIC_IP"
 # ========== 高精度 ASN 查询 ==========
 print_title "【IP 归属信息】"
 
-# 尝试静默安装 jq
 if ! command -v jq >/dev/null; then
     if command -v apt >/dev/null 2>&1; then
         timeout 30 apt update >/dev/null 2>&1 && timeout 60 apt install -y jq >/dev/null 2>&1
@@ -58,7 +53,6 @@ fi
 
 ORG_INFO="N/A"; GEO_INFO="N/A"
 
-# 方法 1: ip-api.com (优先)
 if command -v jq >/dev/null && command -v curl >/dev/null; then
     RESP=$(timeout 6 curl -s "http://ip-api.com/json/${PUBLIC_IP}?fields=status,country,regionName,city,isp,as" 2>/dev/null)
     if [[ -n "$RESP" ]] && [[ "$(echo "$RESP" | jq -r '.status // "fail"' 2>/dev/null)" == "success" ]]; then
@@ -71,7 +65,6 @@ if command -v jq >/dev/null && command -v curl >/dev/null; then
     fi
 fi
 
-# 方法 2: whois fallback
 if [[ "$ORG_INFO" == "N/A" ]] && command -v whois >/dev/null; then
     WHOIS_OUT=$(timeout 5 whois "$PUBLIC_IP" 2>/dev/null)
     if [[ -n "$WHOIS_OUT" ]]; then
@@ -82,7 +75,6 @@ if [[ "$ORG_INFO" == "N/A" ]] && command -v whois >/dev/null; then
     fi
 fi
 
-# 特殊处理：阿里云香港 IP 段（语法已校验）
 if [[ "$PUBLIC_IP" =~ ^(47\.23[89]|47\.24[01]|47\.251|8\.21[01])\. ]] && [[ "$GEO_INFO" == *"N/A"* ]]; then
     GEO_INFO="Hong Kong (inferred from IP range)"
     ORG_INFO="Alibaba Cloud (AS45102)"
@@ -91,29 +83,34 @@ fi
 print_info "组织 (ASN)" "$ORG_INFO"
 print_info "地理位置" "$GEO_INFO"
 
-# ========== 带宽测试（无警告版）==========
+# ========== 带宽测试（阿里云友好版）==========
 print_title "【网络带宽测试】"
 
 test_download() {
-    local url=$1; local name=$2; local bytes=${3:-10485760}
-    local ua="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    local url=$1; local name=$2
+    
+    # 使用最简 UA，避免被识别为自动化工具
+    local ua="curl/7.81.0"
     
     local output
-    output=$(timeout 20 curl -4 -s \
+    output=$(timeout 25 curl -4 -s \
         -H "User-Agent: $ua" \
+        -H "Accept: */*" \
         --write-out "HTTP_CODE:%{http_code}\nSIZE:%{size_download}\nSPEED:%{speed_download}\n" \
-        --connect-timeout 10 \
-        "${url}?bytes=${bytes}" 2>/dev/null)
+        --connect-timeout 8 \
+        --max-time 20 \
+        "$url" 2>/dev/null)
     
     if [[ -z "$output" ]]; then
-        HTTP=0; SIZE=0; SPEED=0
-    else
-        HTTP=$(echo "$output" | grep '^HTTP_CODE:' | cut -d: -f2)
-        SIZE=$(echo "$output" | grep '^SIZE:'      | cut -d: -f2)
-        SPEED=$(echo "$output" | grep '^SPEED:'    | cut -d: -f2)
-        HTTP=${HTTP//[!0-9]/}; SIZE=${SIZE//[!0-9]/}; SPEED=${SPEED//[!0-9.]/}
-        HTTP=${HTTP:-0}; SIZE=${SIZE:-0}; SPEED=${SPEED:-0}
+        return 1
     fi
+
+    HTTP=$(echo "$output" | grep '^HTTP_CODE:' | cut -d: -f2)
+    SIZE=$(echo "$output" | grep '^SIZE:'      | cut -d: -f2)
+    SPEED=$(echo "$output" | grep '^SPEED:'    | cut -d: -f2)
+    
+    HTTP=${HTTP//[!0-9]/}; SIZE=${SIZE//[!0-9]/}; SPEED=${SPEED//[!0-9.]/}
+    HTTP=${HTTP:-0}; SIZE=${SIZE:-0}; SPEED=${SPEED:-0}
 
     if [[ "$HTTP" == "200" ]] && (( SIZE > 1000000 )); then
         MBPS=$(awk "BEGIN {printf \"%.2f\", $SPEED/1024/1024}")
@@ -123,15 +120,16 @@ test_download() {
     return 1
 }
 
-if ! test_download "https://speed.cloudflare.com/__down" "Cloudflare 下载"; then
-    if ! test_download "https://speedtest.fremont.linode.com/100MB" "Linode 下载" "104857600"; then
-        if ! test_download "http://cachefly.cachefly.net/10mb.test" "CacheFly 下载" ""; then
+# 测速源顺序：优先 CacheFly（小文件快），再 Backblaze（大文件稳）
+if ! test_download "http://cachefly.cachefly.net/10mb.test" "CacheFly 下载"; then
+    if ! test_download "https://speed.backblazeb2.com/100MB.bin" "Backblaze 下载"; then
+        if ! test_download "https://librespeed.org/backend/download.php?size=10000000" "LibreSpeed 下载"; then
             print_error "所有下载测速源均失败"
         fi
     fi
 fi
 
-# 上传测试
+# 上传测试（保持不变）
 dd if=/dev/zero of=/tmp/upload.bin bs=1M count=10 &>/dev/null
 UL_BPS=$(timeout 20 curl -4 -T /tmp/upload.bin -s -w "%{speed_upload}" \
     "https://speed.cloudflare.com/__up" --connect-timeout 10 2>/dev/null) || UL_BPS=""
@@ -143,7 +141,7 @@ else
     print_warning "上传测试失败"
 fi
 
-# ========== 国内延迟 ==========
+# ========== 国内延迟 & AI 可用性（保持不变）==========
 print_title "【中国大陆网络质量】"
 echo "💡 注意：以下延迟表示「本 VPS 到国内 CDN 节点」的访问速度"
 echo "   用于评估建站/代理性能。若需测试「你本地到本 VPS」的延迟，"
@@ -174,7 +172,6 @@ for region in "${!NODES[@]}"; do
     fi
 done
 
-# ========== AI 可用性 ==========
 print_title "【主流 AI 网站可用性】"
 declare -A AI_SITES=(
     ["ChatGPT"]="chat.openai.com"
