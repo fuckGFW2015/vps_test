@@ -1,10 +1,10 @@
 #!/bin/bash
-# vps-check-aliyun-stable.sh
+# vps-check-full-auto.sh
 # 特点：
-#   ✅ 复用你首次成功的下载方式（http://cachefly.net/10mb.test）
-#   ✅ 不设置任何 User-Agent 或 Header（避免触发阿里云风控）
-#   ✅ 用纯字符串长度判断下载成功（绕过 curl -w 的 null byte 问题）
-#   ✅ 保留所有其他功能（ASN、延迟、AI 等）
+#   ✅ 自动安装 Speedtest CLI（如未安装）
+#   ✅ 精准测速（复现 ecs 脚本结果）
+#   ✅ 阿里云/腾讯云/RACKNERD 全兼容
+#   ✅ 保留原有 UI 与功能模块
 
 export LC_ALL=C
 
@@ -79,7 +79,6 @@ if [[ "$ORG_INFO" == "N/A" ]] && command -v whois >/dev/null; then
     fi
 fi
 
-# 阿里云香港 IP 段智能推断
 if [[ "$PUBLIC_IP" =~ ^(47\.23[89]|47\.24[01]|47\.251|8\.21[01])\. ]] && [[ "$GEO_INFO" == *"N/A"* ]]; then
     GEO_INFO="Hong Kong (inferred from IP range)"
     ORG_INFO="Alibaba Cloud (AS45102)"
@@ -88,47 +87,100 @@ fi
 print_info "组织 (ASN)" "$ORG_INFO"
 print_info "地理位置" "$GEO_INFO"
 
-# ========== 网络带宽测试（阿里云稳定版）==========
+# ========== 网络带宽测试（自动安装 Speedtest CLI）==========
 print_title "【网络带宽测试】"
 
-test_download() {
-    local url=$1
-    local name=$2
-    
-    # 关键：不设 UA，不设 Header，用 HTTP（对 cachefly）
-    local start_time=$(date +%s%3N)
-    local data
-    data=$(timeout 20 curl -4 -s --connect-timeout 8 "$url" 2>/dev/null)
-    local end_time=$(date +%s%3N)
-    
-    local size=${#data}
-    # 成功条件：下载 > 1MB
-    if [[ $size -gt 1000000 ]]; then
-        local elapsed_ms=$((end_time - start_time))
-        if [[ $elapsed_ms -le 0 ]]; then elapsed_ms=1; fi
-        # 计算 MB/s
-        local speed_mbps=$(awk "BEGIN {printf \"%.2f\", ($size * 1000 / $elapsed_ms) / 1024 / 1024}")
-        print_success "${name}: ${speed_mbps} MB/s"
+install_speedtest() {
+    if command -v speedtest >/dev/null 2>&1; then
         return 0
     fi
-    return 1
+
+    print_info "Speedtest CLI" "未检测到，正在自动安装..."
+    
+    # 检测系统类型
+    if command -v apt >/dev/null 2>&1; then
+        # Ubuntu/Debian
+        if ! timeout 30 curl -s https://install.speedtest.net/app/cli/install.deb.sh | sudo bash >/dev/null 2>&1; then
+            print_error "Speedtest 安装失败（apt 系统）"
+            return 1
+        fi
+        if ! timeout 60 sudo apt install -y speedtest >/dev/null 2>&1; then
+            print_error "Speedtest 安装失败（apt install）"
+            return 1
+        fi
+    elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then
+        # CentOS/Rocky/AlmaLinux
+        if ! timeout 30 curl -s https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.rpm.sh | sudo bash >/dev/null 2>&1; then
+            print_error "Speedtest 仓库添加失败（yum/dnf 系统）"
+            return 1
+        fi
+        if command -v dnf >/dev/null 2>&1; then
+            if ! timeout 60 sudo dnf install -y speedtest >/dev/null 2>&1; then
+                print_error "Speedtest 安装失败（dnf）"
+                return 1
+            fi
+        else
+            if ! timeout 60 sudo yum install -y speedtest >/dev/null 2>&1; then
+                print_error "Speedtest 安装失败（yum）"
+                return 1
+            fi
+        fi
+    else
+        print_warning "不支持的包管理器，跳过安装"
+        return 1
+    fi
+
+    if command -v speedtest >/dev/null 2>&1; then
+        print_success "Speedtest CLI 安装成功"
+        return 0
+    else
+        print_error "Speedtest 安装完成但无法调用"
+        return 1
+    fi
 }
 
-# 使用你首次成功的源：CacheFly via HTTP
-if ! test_download "http://cachefly.cachefly.net/10mb.test" "CacheFly 下载"; then
-    print_error "下载测速失败（可能被临时限制）"
-fi
+run_speedtest() {
+    if ! command -v speedtest >/dev/null 2>&1; then
+        if ! install_speedtest; then
+            return 1
+        fi
+    fi
 
-# 上传测试（保持原样）
-dd if=/dev/zero of=/tmp/upload.bin bs=1M count=10 &>/dev/null
-UL_BPS=$(timeout 20 curl -4 -T /tmp/upload.bin -s -w "%{speed_upload}" \
-    "https://speed.cloudflare.com/__up" --connect-timeout 10 2>/dev/null) || UL_BPS=""
-rm -f /tmp/upload.bin
-if [[ -n "$UL_BPS" && "$UL_BPS" != "0" ]]; then
-    UL_MBS=$(awk "BEGIN {printf \"%.2f\", $UL_BPS/1024/1024}")
-    print_success "上传速度: ${UL_MBS} MB/s"
-else
-    print_warning "上传测试失败"
+    echo "⏳ 正在运行 Speedtest（连接最近节点）..."
+    local json_output
+    json_output=$(timeout 45 speedtest --accept-license --accept-gdpr --format=json 2>/dev/null)
+
+    if [[ -n "$json_output" ]] && echo "$json_output" | jq -e . >/dev/null 2>&1; then
+        local dl_bps=$(echo "$json_output" | jq -r '.download.bandwidth // empty')
+        local ul_bps=$(echo "$json_output" | jq -r '.upload.bandwidth // empty')
+        local ping_ms=$(echo "$json_output" | jq -r '.ping.latency // empty')
+        
+        if [[ "$dl_bps" != "null" && "$dl_bps" -gt 0 ]]; then
+            local dl_mbps=$(awk "BEGIN {printf \"%.2f\", $dl_bps*8/1000000}")
+            print_success "下载速度: ${dl_mbps} Mbps"
+        fi
+        if [[ "$ul_bps" != "null" && "$ul_bps" -gt 0 ]]; then
+            local ul_mbps=$(awk "BEGIN {printf \"%.2f\", $ul_bps*8/1000000}")
+            print_success "上传速度: ${ul_mbps} Mbps"
+        fi
+        if [[ "$ping_ms" != "null" ]]; then
+            print_success "延迟: ${ping_ms} ms"
+        fi
+        return 0
+    else
+        print_error "Speedtest 执行失败或无有效输出"
+        return 1
+    fi
+}
+
+# 执行测速（自动安装 + 运行）
+if ! run_speedtest; then
+    print_warning "Speedtest 测速失败，尝试本地镜像验证网络连通性"
+    if timeout 5 curl -sf http://mirrors.aliyun.com/ubuntu/ls-lR.gz > /dev/null 2>&1; then
+        print_success "阿里云镜像: 可访问（说明出站网络正常）"
+    else
+        print_error "本地镜像也无法访问，可能存在网络限制"
+    fi
 fi
 
 # ========== 国内延迟 & AI 可用性 ==========
