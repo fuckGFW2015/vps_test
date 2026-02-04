@@ -1,5 +1,5 @@
 #!/bin/bash
-# vps-check-fixed.sh
+# vps.sh
 # 专为阿里云等环境优化：自动安装官方 Speedtest CLI，精准测速
 
 export LC_ALL=C
