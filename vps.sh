@@ -1,12 +1,11 @@
 #!/bin/bash
-# vps.sh - 阿里云/腾讯云/VPS 终极检测脚本（容错增强版）
+# vps-check-ultimate.sh - 终极 VPS 检测脚本（高精度 ASN + 多源测速）
 # 特点：
-#   ✅ 自动获取真实公网 IP（即使在 NAT/容器中）
-#   ✅ 所有网络请求独立容错，失败不中断
-#   ✅ 默认全功能开启，无需参数
-#   ✅ 仅依赖 curl / ping / ip（几乎所有系统自带）
+#   ✅ 使用 ipapi.co 精准识别阿里云香港等节点
+#   ✅ 下载测速自动验证 + fallback 到 Linode/CacheFly
+#   ✅ 明确提示“VPS 到国内” ≠ “你本地到 VPS”
+#   ✅ 无 jq 依赖，仅需 curl/ip/ping
 
-# ========== 工具函数 ==========
 print_title() {
     echo -e "\n\033[1;36m==================================================\033[0m"
     echo -e "\033[1;36m$1\033[0m"
@@ -29,12 +28,8 @@ print_error() {
     echo -e "❌ \033[1;31m$1\033[0m"
 }
 
-# ========== 参数处理 ==========
-ENABLE_SPEED=true
-ENABLE_LATENCY=true
-ENABLE_AI=true
-ENABLE_ASN=true
-
+# 默认启用全部
+ENABLE_SPEED=true; ENABLE_LATENCY=true; ENABLE_AI=true; ENABLE_ASN=true
 if [[ $# -gt 0 ]]; then
     ENABLE_SPEED=false; ENABLE_LATENCY=false; ENABLE_AI=false; ENABLE_ASN=false
     for arg in "$@"; do
@@ -43,13 +38,12 @@ if [[ $# -gt 0 ]]; then
             -latency)   ENABLE_LATENCY=true ;;
             -ai)        ENABLE_AI=true ;;
             -asn)       ENABLE_ASN=true ;;
-            *) 
-                echo "用法: $0 [可选: -speed -latency -ai -asn]"; exit 1 ;;
+            *) echo "用法: $0 [可选: -speed -latency -ai -asn]"; exit 1 ;;
         esac
     done
 fi
 
-# ========== 系统信息（本地命令，必成功）==========
+# ========== 系统信息 ==========
 print_title "【系统基本信息】"
 print_info "主机名" "$(hostname)"
 print_info "内核版本" "$(uname -r 2>/dev/null || echo "N/A")"
@@ -57,72 +51,87 @@ print_info "操作系统" "$(grep PRETTY_NAME /etc/os-release | cut -d= -f2 | tr
 print_info "架构" "$(uname -m 2>/dev/null || echo "N/A")"
 print_info "虚拟化" "$(systemd-detect-virt 2>/dev/null || echo "未知")"
 
-# ========== 智能获取公网 IP ==========
-print_info "内网 IPv4" "$(ip route get 8.8.8.8 2>/dev/null | awk 'NR==1{print $7}' || echo "N/A")"
+LOCAL_IP=$(ip route get 8.8.8.8 2>/dev/null | awk 'NR==1{print $7}' || echo "N/A")
+PUBLIC_IP=$(timeout 5 curl -s https://ifconfig.me 2>/dev/null || timeout 5 wget -qO- https://ifconfig.me 2>/dev/null || echo "N/A")
 
-PUBLIC_IP=""
-if command -v curl >/dev/null; then
-    PUBLIC_IP=$(timeout 5 curl -s https://ifconfig.me 2>/dev/null)
-fi
-if [[ -z "$PUBLIC_IP" || "$PUBLIC_IP" == *"html"* ]]; then
-    if command -v wget >/dev/null; then
-        PUBLIC_IP=$(timeout 5 wget -qO- https://ifconfig.me 2>/dev/null)
-    fi
-fi
-print_info "公网 IPv4" "${PUBLIC_IP:-无法探测}"
+print_info "内网 IPv4" "$LOCAL_IP"
+print_info "公网 IPv4" "$PUBLIC_IP"
 
-# ========== ASN 查询 ==========
-if $ENABLE_ASN && [[ -n "$PUBLIC_IP" && "$PUBLIC_IP" != "无法探测" ]]; then
+# ========== 高精度 ASN 查询（使用 ipapi.co）==========
+if $ENABLE_ASN && [[ "$PUBLIC_IP" != "N/A" ]] && command -v curl >/dev/null; then
     print_title "【IP 归属信息】"
-    if command -v curl >/dev/null; then
-        ASN_JSON=$(timeout 6 curl -s "https://ipinfo.io/${PUBLIC_IP}/json" 2>/dev/null)
-        if [[ -n "$ASN_JSON" && "$ASN_JSON" != *"rate limit"* && "$ASN_JSON" != *"Wrong IP"* ]]; then
-            ORG=$(echo "$ASN_JSON" | grep -o '"org":"[^"]*"' | cut -d'"' -f4)
-            COUNTRY=$(echo "$ASN_JSON" | grep -o '"country":"[^"]*"' | cut -d'"' -f4)
-            REGION=$(echo "$ASN_JSON" | grep -o '"region":"[^"]*"' | cut -d'"' -f4)
-            print_info "组织 (ASN)" "${ORG:-N/A}"
-            print_info "地理位置" "${COUNTRY:-N/A} ${REGION:-}"
-        else
-            print_warning "ASN 查询失败（限速或无效 IP）"
+    RESPONSE=$(timeout 6 curl -s "https://ipapi.co/${PUBLIC_IP}/json/" 2>/dev/null)
+    
+    if [[ -n "$RESPONSE" && "$RESPONSE" != *"error"* && "$RESPONSE" != *"reserved"* && "$RESPONSE" != *"private"* ]]; then
+        ORG=$(echo "$RESPONSE" | grep -o '"org":"[^"]*"' | cut -d'"' -f4)
+        COUNTRY=$(echo "$RESPONSE" | grep -o '"country_name":"[^"]*"' | cut -d'"' -f4)
+        REGION=$(echo "$RESPONSE" | grep -o '"region":"[^"]*"' | cut -d'"' -f4)
+        
+        # 特殊处理：若 country_name 为空但 IP 属于知名云厂商
+        if [[ -z "$COUNTRY" ]]; then
+            if [[ "$ORG" == *"Alibaba"* || "$ORG" == *"Tencent"* || "$ORG" == *"Huawei"* ]]; then
+                COUNTRY="Hong Kong (inferred from org)"
+            fi
         fi
+        
+        print_info "组织 (ASN)" "${ORG:-N/A}"
+        print_info "地理位置" "${COUNTRY:-N/A} ${REGION:-}"
     else
-        print_warning "curl 未安装，跳过 ASN 查询"
+        print_warning "ASN 查询失败（IP 可能为内网或受限）"
     fi
 fi
 
-# ========== 带宽测试 ==========
+# ========== 带宽测试（增强版）==========
 if $ENABLE_SPEED; then
     print_title "【网络带宽测试】"
-    if command -v curl >/dev/null; then
-        echo "🌐 测速源: Cloudflare (100MB 下载 + 10MB 上传)"
-
-        # 下载测试
-        if DL_BPS=$(timeout 20 curl -4 -o /dev/null -s -w "%{speed_download}" \
-            "https://speed.cloudflare.com/__down?bytes=104857600" --connect-timeout 10 2>/dev/null) && [[ -n "$DL_BPS" && "$DL_BPS" != "0" ]]; then
-            DL_MBS=$(awk "BEGIN {printf \"%.2f\", $DL_BPS/1024/1024}")
-            print_success "下载速度: ${DL_MBS} MB/s"
-        else
-            print_warning "下载测试失败（网络不通或超时）"
+    
+    test_download() {
+        local url=$1; local name=$2; local bytes=${3:-10485760}
+        local ua="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        
+        RESULT=$(timeout 20 curl -4 -s -w "%{http_code}:%{size_download}:%{speed_download}" \
+            -H "User-Agent: $ua" \
+            "${url}?bytes=${bytes}" --connect-timeout 10 2>/dev/null || echo "0:0:0")
+        
+        HTTP=$(echo "$RESULT" | cut -d: -f1)
+        SIZE=$(echo "$RESULT" | cut -d: -f2)
+        SPEED=$(echo "$RESULT" | cut -d: -f3)
+        
+        if [[ "$HTTP" == "200" && "$SIZE" -gt 1000000 ]]; then
+            MBPS=$(awk "BEGIN {printf \"%.2f\", $SPEED/1024/1024}")
+            print_success "${name}: ${MBPS} MB/s"
+            return 0
         fi
+        return 1
+    }
 
-        # 上传测试
-        dd if=/dev/zero of=/tmp/upload.bin bs=1M count=10 &>/dev/null
-        if UL_BPS=$(timeout 20 curl -4 -T /tmp/upload.bin -s -w "%{speed_upload}" \
-            "https://speed.cloudflare.com/__up" --connect-timeout 10 2>/dev/null) && [[ -n "$UL_BPS" && "$UL_BPS" != "0" ]]; then
-            UL_MBS=$(awk "BEGIN {printf \"%.2f\", $UL_BPS/1024/1024}")
-            print_success "上传速度: ${UL_MBS} MB/s"
-        else
-            print_warning "上传测试失败（部分云厂商限制 POST）"
+    if ! test_download "https://speed.cloudflare.com/__down" "Cloudflare 下载"; then
+        if ! test_download "https://speedtest.fremont.linode.com/100MB" "Linode 下载" "104857600"; then
+            if ! test_download "http://cachefly.cachefly.net/10mb.test" "CacheFly 下载" ""; then
+                print_error "所有下载测速源均失败"
+            fi
         fi
-        rm -f /tmp/upload.bin
+    fi
+
+    # 上传测试
+    dd if=/dev/zero of=/tmp/upload.bin bs=1M count=10 &>/dev/null
+    UL_BPS=$(timeout 20 curl -4 -T /tmp/upload.bin -s -w "%{speed_upload}" \
+        "https://speed.cloudflare.com/__up" --connect-timeout 10 2>/dev/null) || UL_BPS=""
+    rm -f /tmp/upload.bin
+    if [[ -n "$UL_BPS" && "$UL_BPS" != "0" ]]; then
+        UL_MBS=$(awk "BEGIN {printf \"%.2f\", $UL_BPS/1024/1024}")
+        print_success "上传速度: ${UL_MBS} MB/s"
     else
-        print_warning "curl 未安装，跳过带宽测试"
+        print_warning "上传测试失败"
     fi
 fi
 
-# ========== 中国大陆延迟 ==========
+# ========== 国内延迟（带明确提示）==========
 if $ENABLE_LATENCY; then
     print_title "【中国大陆网络质量】"
+    echo "💡 注意：以下延迟表示「本 VPS 到国内 CDN 节点」的访问速度"
+    echo "   用于评估建站/代理性能。若需测试「你本地到本 VPS」的延迟，"
+    echo "   请在你的电脑上运行：ping $PUBLIC_IP"
     echo "（单位：毫秒，越低越好）"
 
     declare -A NODES=(
@@ -136,8 +145,6 @@ if $ENABLE_LATENCY; then
     for region in "${!NODES[@]}"; do
         host="${NODES[$region]}"
         printf "%-8s → " "$region"
-
-        # 优先 ping，否则 HTTPS 延迟
         if timeout 4 ping -c1 -W2 "$host" &>/dev/null; then
             latency=$(ping -c1 -W2 "$host" 2>/dev/null | grep 'time=' | awk -F'time=' '{print $2}' | cut -d' ' -f1)
             printf "\033[1;32m%6.1f ms\033[0m\n" "$latency"
@@ -152,7 +159,7 @@ if $ENABLE_LATENCY; then
     done
 fi
 
-# ========== AI 网站可用性 ==========
+# ========== AI 可用性 ==========
 if $ENABLE_AI; then
     print_title "【主流 AI 网站可用性】"
     declare -A AI_SITES=(
@@ -165,7 +172,6 @@ if $ENABLE_AI; then
         ["DeepSeek"]="deepseek.com"
         ["豆包"]="doubao.com"
     )
-
     for name in "${!AI_SITES[@]}"; do
         domain="${AI_SITES[$name]}"
         if timeout 6 curl -s --head --fail "https://$domain" --connect-timeout 4 &>/dev/null; then
@@ -176,6 +182,5 @@ if $ENABLE_AI; then
     done
 fi
 
-# ========== 结束 ==========
 print_title "【检测完成】"
 print_success "所有结果仅在本地显示，未上传任何数据。"
