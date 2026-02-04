@@ -87,34 +87,38 @@ print_info "地理位置" "$GEO_INFO"
 print_title "【网络带宽测试】"
 
 install_speedtest_official() {
-    print_info "Speedtest CLI" "正在下载官方静态二进制（兼容 Ubuntu 22.04.5）..."
+    print_info "Speedtest CLI" "正在下载官方二进制（安全安装）..."
 
-    # 确保有 curl
     if ! command -v curl >/dev/null; then
         if command -v apt >/dev/null 2>&1; then
             timeout 30 apt update >/dev/null 2>&1 && timeout 60 apt install -y curl ca-certificates
         fi
     fi
 
-    # 创建目标目录
-    sudo mkdir -p /usr/local/bin
-
-    # 直接下载 x86_64 静态二进制（不依赖 apt 仓库）
-    if sudo curl -L https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-x86_64.tgz \
-        | sudo tar -xz -C /usr/local/bin --strip-components=1 speedtest; then
+    # 创建临时目录
+    tmp_dir=$(mktemp -d)
+    
+    # 下载并解压
+    if curl -L https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-x86_64.tgz | tar -xz -C "$tmp_dir"; then
+        # 找到 speedtest 可执行文件（无论目录名是什么）
+        bin_path=$(find "$tmp_dir" -name "speedtest" -type f | head -n1)
         
-        sudo chmod +x /usr/local/bin/speedtest
-        
-        if command -v speedtest >/dev/null 2>&1; then
-            print_success "Speedtest CLI 安装成功（静态二进制版）"
-            return 0
+        if [[ -n "$bin_path" ]]; then
+            sudo cp "$bin_path" /usr/local/bin/speedtest
+            sudo chmod +x /usr/local/bin/speedtest
+            
+            if command -v speedtest >/dev/null 2>&1; then
+                rm -rf "$tmp_dir"
+                print_success "Speedtest CLI 安装成功"
+                return 0
+            fi
         fi
     fi
 
-    print_error "Speedtest 静态二进制安装失败"
+    rm -rf "$tmp_dir"
+    print_error "Speedtest 安装失败"
     return 1
 }
-
 run_speedtest() {
     # 先检查是否已安装（PATH 中包含 /usr/local/bin）
     if ! command -v speedtest >/dev/null 2>&1; then
