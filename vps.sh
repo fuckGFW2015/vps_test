@@ -34,10 +34,6 @@ if ! command -v free >/dev/null || ! command -v df >/dev/null; then
     exit 1
 fi
 
-# ========== 3. 主逻辑开始 ==========
-print_title "【系统基本信息】"
-# ... 后续代码
-
 # ========== 系统信息 ==========
 print_title "【系统基本信息】"
 print_info "主机名" "$(hostname)"
