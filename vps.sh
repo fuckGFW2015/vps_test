@@ -4,6 +4,7 @@
 
 export LC_ALL=C
 
+# ========== 1. 函数定义 ==========
 print_title() {
     echo -e "\n\033[1;36m==================================================\033[0m"
     echo -e "\033[1;36m$1\033[0m"
@@ -25,6 +26,17 @@ print_warning() {
 print_error() {
     echo -e "❌ \033[1;31m$1\033[0m"
 }
+
+# ========== 2. 环境兼容性检查 ==========
+if ! command -v free >/dev/null || ! command -v df >/dev/null; then
+    print_error "当前环境缺少基础工具（free/df），可能为容器或 Alpine 系统"
+    echo "   请在标准 Ubuntu/Debian/CentOS 上运行"
+    exit 1
+fi
+
+# ========== 3. 主逻辑开始 ==========
+print_title "【系统基本信息】"
+# ... 后续代码
 
 # ========== 系统信息 ==========
 print_title "【系统基本信息】"
