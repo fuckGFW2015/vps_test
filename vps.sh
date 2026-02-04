@@ -75,7 +75,7 @@ if [[ "$ORG_INFO" == "N/A" ]] && command -v whois >/dev/null; then
     fi
 fi
 
-if [[ "$PUBLIC_IP" =～ ^(47\.23[89]|47\.24[01]|47\.251|8\.21[01])\. ]] && [[ "$GEO_INFO" == *"N/A"* ]]; then
+if [[ "$PUBLIC_IP" =~ ^(47\.23[89]|47\.24[01]|47\.251|8\.21[01])\. ]] && [[ "$GEO_INFO" == *"N/A"* ]]; then
     GEO_INFO="Hong Kong (inferred from IP range)"
     ORG_INFO="Alibaba Cloud (AS45102)"
 fi
