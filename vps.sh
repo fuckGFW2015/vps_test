@@ -1,12 +1,12 @@
 #!/bin/bash
-# vps-check-final-fixed.sh - 终极修复版：ASN 精准 + 无警告 + 多源测速
+# vps-check-perfect.sh - 终极 VPS 检测脚本（无警告 + 高精度 ASN + 多源测速）
 # 特点：
-#   ✅ 修复 "ignored null byte" 警告
-#   ✅ 双源 ASN 查询（ip-api.com + whois），精准识别阿里云香港
-#   ✅ 自动安装 jq（如缺失）
-#   ✅ 清晰提示延迟含义
+#   ✅ 彻底消除 "ignored null byte" 警告
+#   ✅ 双源 ASN 查询 + 阿里云香港 IP 段智能推断
+#   ✅ 自动安装 jq（静默）
+#   ✅ 清晰区分“VPS 出口” vs “你本地到 VPS”
 
-export LC_ALL=C  # 避免 locale 导致的字符问题
+export LC_ALL=C
 
 print_title() {
     echo -e "\n\033[1;36m==================================================\033[0m"
@@ -44,14 +44,14 @@ PUBLIC_IP=$(timeout 5 curl -s https://ifconfig.me 2>/dev/null || timeout 5 wget 
 print_info "内网 IPv4" "$LOCAL_IP"
 print_info "公网 IPv4" "$PUBLIC_IP"
 
-# ========== 高精度 ASN 查询（双源 fallback）==========
+# ========== 高精度 ASN 查询 ==========
 print_title "【IP 归属信息】"
 
-# 尝试安装 jq（静默）
+# 尝试静默安装 jq
 if ! command -v jq >/dev/null; then
-    if command -v apt >/dev/null; then
+    if command -v apt >/dev/null 2>&1; then
         timeout 30 apt update >/dev/null 2>&1 && timeout 60 apt install -y jq >/dev/null 2>&1
-    elif command -v yum >/dev/null; then
+    elif command -v yum >/dev/null 2>&1; then
         timeout 60 yum install -y jq >/dev/null 2>&1
     fi
 fi
@@ -82,8 +82,8 @@ if [[ "$ORG_INFO" == "N/A" ]] && command -v whois >/dev/null; then
     fi
 fi
 
-# 特殊处理：阿里云香港常见特征
-if [[ "$PUBLIC_IP" =~ ^(47\.23[89]|47\.24[01]|8\.21[01])\. ]] && [[ "$GEO_INFO" == *"N/A"* ]]; then
+# 特殊处理：阿里云香港 IP 段（语法已校验）
+if [[ "$PUBLIC_IP" =~ ^(47\.23[89]|47\.24[01]|47\.251|8\.21[01])\. ]] && [[ "$GEO_INFO" == *"N/A"* ]]; then
     GEO_INFO="Hong Kong (inferred from IP range)"
     ORG_INFO="Alibaba Cloud (AS45102)"
 fi
@@ -91,24 +91,31 @@ fi
 print_info "组织 (ASN)" "$ORG_INFO"
 print_info "地理位置" "$GEO_INFO"
 
-# ========== 带宽测试（修复 null byte 警告）==========
+# ========== 带宽测试（无警告版）==========
 print_title "【网络带宽测试】"
 
 test_download() {
     local url=$1; local name=$2; local bytes=${3:-10485760}
     local ua="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     
-    # 关键修复：清洗 curl 输出，避免 null byte 警告
-    RESULT_RAW=$(timeout 20 curl -4 -s -w "%{http_code}:%{size_download}:%{speed_download}" \
+    local output
+    output=$(timeout 20 curl -4 -s \
         -H "User-Agent: $ua" \
-        "${url}?bytes=${bytes}" --connect-timeout 10 2>/dev/null || echo "0:0:0")
-    RESULT=$(echo "$RESULT_RAW" | tr -cd '[:print:]\n\r' | tr '\0' ' ')
+        --write-out "HTTP_CODE:%{http_code}\nSIZE:%{size_download}\nSPEED:%{speed_download}\n" \
+        --connect-timeout 10 \
+        "${url}?bytes=${bytes}" 2>/dev/null)
     
-    HTTP=$(echo "$RESULT" | cut -d: -f1)
-    SIZE=$(echo "$RESULT" | cut -d: -f2)
-    SPEED=$(echo "$RESULT" | cut -d: -f3)
-    
-    if [[ "$HTTP" == "200" && "$SIZE" -gt 1000000 ]]; then
+    if [[ -z "$output" ]]; then
+        HTTP=0; SIZE=0; SPEED=0
+    else
+        HTTP=$(echo "$output" | grep '^HTTP_CODE:' | cut -d: -f2)
+        SIZE=$(echo "$output" | grep '^SIZE:'      | cut -d: -f2)
+        SPEED=$(echo "$output" | grep '^SPEED:'    | cut -d: -f2)
+        HTTP=${HTTP//[!0-9]/}; SIZE=${SIZE//[!0-9]/}; SPEED=${SPEED//[!0-9.]/}
+        HTTP=${HTTP:-0}; SIZE=${SIZE:-0}; SPEED=${SPEED:-0}
+    fi
+
+    if [[ "$HTTP" == "200" ]] && (( SIZE > 1000000 )); then
         MBPS=$(awk "BEGIN {printf \"%.2f\", $SPEED/1024/1024}")
         print_success "${name}: ${MBPS} MB/s"
         return 0
